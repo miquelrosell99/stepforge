@@ -38,7 +38,7 @@ class IMPORT_OT_stepforge(bpy.types.Operator, ImportHelper):
     bl_options = {"REGISTER", "UNDO"}
 
     filename_ext = ".stp"
-    filter_glob: StringProperty(default="*.stp;*.step;*.STP;*.STEP", options={"HIDDEN"})
+    filter_glob: StringProperty(default="*.stp;*.step;*.igs;*.iges;*.STP;*.STEP;*.IGS;*.IGES", options={"HIDDEN"})
     files: CollectionProperty(type=bpy.types.OperatorFileListElement)
     directory: StringProperty(subtype="DIR_PATH")
 
@@ -83,6 +83,9 @@ class IMPORT_OT_stepforge(bpy.types.Operator, ImportHelper):
         name="Custom rules", subtype="FILE_PATH",
         description="JSON ruleset: {\"rules\": [{\"field\": \"name|color\", \"pattern\": ..., \"material\": preset|\"color\"}]}")
     smooth: BoolProperty(name="Smooth shading", default=False)
+    heal: BoolProperty(
+        name="Heal geometry", default=False,
+        description="ShapeFix pass before tessellation (sews faces, fixes small errors; slower)")
 
     # optional GMI workspace integration
     gmi_register: BoolProperty(
@@ -112,6 +115,7 @@ class IMPORT_OT_stepforge(bpy.types.Operator, ImportHelper):
         if self.ruleset == "custom":
             col.prop(self, "custom_rules_path")
         col.prop(self, "smooth")
+        col.prop(self, "heal")
         if gmi.workspace():
             col = l.column(align=True)
             col.label(text="GMI workspace:")
@@ -134,6 +138,7 @@ class IMPORT_OT_stepforge(bpy.types.Operator, ImportHelper):
             "share_instances": self.share_instances,
             "scale": self.scale,
             "smooth": self.smooth,
+            "heal": self.heal,
             "root_prefix": self.root_prefix,
             "quality": self.quality,
             "linear": self._deflections()[0],
@@ -192,6 +197,8 @@ class IMPORT_OT_stepforge(bpy.types.Operator, ImportHelper):
 
         t0 = time.time()
         doc = StepDoc(path)
+        if options.get("heal"):
+            _heal(doc)
         linear, angular = options["linear"], options["angular"]
         compound = TopoDS_Compound()
         BRep_Builder().MakeCompound(compound)
@@ -275,6 +282,8 @@ class OBJECT_OT_stepforge_reimport(bpy.types.Operator):
 
         try:
             doc = StepDoc(src)
+            if merged.get("heal"):
+                _heal(doc)
             compound = TopoDS_Compound()
             BRep_Builder().MakeCompound(compound)
             for proto in doc.protos.values():
@@ -301,4 +310,26 @@ class OBJECT_OT_stepforge_reimport(bpy.types.Operator):
         return {"FINISHED"}
 
 
-classes = (IMPORT_OT_stepforge, OBJECT_OT_stepforge_reimport)
+def _heal(doc):
+    from OCP.ShapeFix import ShapeFix_Shape
+    for proto in doc.protos.values():
+        fix = ShapeFix_Shape(proto.shape)
+        fix.Perform()
+        proto.shape = fix.Shape()
+
+
+class STEPforgeFileHandler(bpy.types.FileHandler):
+    """Viewport drag-and-drop + File Browser import integration."""
+    bl_idname = "stepforge_fh_import"
+    bl_label = "STEPforge"
+    bl_import_operator = "import_scene.stepforge"
+    bl_file_extensions = ".stp;.step;.igs;.iges"
+    bl_has_custom_props = True
+
+    @classmethod
+    def poll_file(cls, drop_context, filepath):
+        return filepath.lower().endswith((".stp", ".step", ".igs", ".iges"))
+
+
+classes = (IMPORT_OT_stepforge, OBJECT_OT_stepforge_reimport,
+           STEPforgeFileHandler)

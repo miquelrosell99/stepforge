@@ -98,6 +98,7 @@ def default_options():
         "share_instances": True,
         "scale": 1.0,                  # extra user multiplier (unit scale is automatic)
         "smooth": False,
+        "heal": False,
         "root_prefix": "",
         "gmi_register": True,
     }

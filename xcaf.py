@@ -95,7 +95,6 @@ class StepDoc(object):
     # -- reading ---------------------------------------------------------
 
     def _read(self):
-        from OCP.STEPCAFControl import STEPCAFControl_Reader
         from OCP.TDocStd import TDocStd_Document
         from OCP.TCollection import TCollection_ExtendedString, TCollection_AsciiString
         from OCP.XCAFDoc import XCAFDoc_DocumentTool
@@ -103,12 +102,23 @@ class StepDoc(object):
         from OCP.TDataStd import TDataStd_Name
         from OCP.TopLoc import TopLoc_Location
 
-        self.unit, self.mm_per_unit = detect_unit(self.path)
+        ext = self.path.lower().rsplit(".", 1)[-1]
+        if ext in ("stp", "step"):
+            from OCP.STEPCAFControl import STEPCAFControl_Reader
+            reader = STEPCAFControl_Reader()
+            self.unit, self.mm_per_unit = detect_unit(self.path)
+        elif ext in ("igs", "iges"):
+            from OCP.IGESCAFControl import IGESCAFControl_Reader
+            reader = IGESCAFControl_Reader()
+            # OCC converts IGES units to its default target (MM); same as STEP
+            self.unit, self.mm_per_unit = "mm", 1.0
+        else:
+            raise RuntimeError("Unsupported extension: .%s" % ext)
 
         doc = TDocStd_Document(TCollection_ExtendedString("stepforge"))
-        reader = STEPCAFControl_Reader()
         reader.SetNameMode(True)
-        reader.SetColorMode(True)
+        if hasattr(reader, "SetColorMode"):
+            reader.SetColorMode(True)
         status = reader.ReadFile(self.path)
         if int(status) != 1:
             raise RuntimeError("ReadFile returned %s" % status)
