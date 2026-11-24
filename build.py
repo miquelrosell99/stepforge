@@ -36,7 +36,58 @@ def _t16_to_matrix(t16):
     return Matrix((t16[0:4], t16[4:8], t16[8:12], t16[12:16]))
 
 
-def _mesh_from_shape(name, shape, scale):
+def face_node_normals(face, tri):
+    """Per-node normals (1-indexed list of gp_Dir) for one tessellated face.
+
+    Preferred: exact CAD surface normals via GeomLProp at each UV node
+    (crisp hard edges; singularity nodes filled from tessellation
+    averages). Fallback: Poly_Triangulation averages. Face orientation
+    applied here; the caller rotates with the face location.
+    Shared with the GMI step_build pipeline (single source).
+    """
+    from OCP.TopAbs import TopAbs_REVERSED
+    from OCP.BRep import BRep_Tool
+    fn = None
+    from_cad = False
+    if tri.HasUVNodes():
+        try:
+            from OCP.GeomLProp import GeomLProp_SLProps
+            surf = BRep_Tool.Surface_s(face)
+            fn = [None]
+            for i in range(1, tri.NbNodes() + 1):
+                uv = tri.UVNode(i)
+                pr = GeomLProp_SLProps(surf, uv.X(), uv.Y(), 1, 1e-9)
+                d = pr.Normal() if pr.IsNormalDefined() else None
+                if d is not None and face.Orientation() == TopAbs_REVERSED:
+                    d.Reverse()
+                fn.append(d)
+            if any(d is None for d in fn[1:]):
+                if not tri.HasNormals():
+                    tri.ComputeNormals()
+                if tri.HasNormals():
+                    for i in range(1, tri.NbNodes() + 1):
+                        if fn[i] is None:
+                            fn[i] = tri.Normal(i)
+                if any(d is None for d in fn[1:]):
+                    fn = None
+            if fn is not None:
+                from_cad = True
+        except Exception:
+            fn = None
+    if fn is None:
+        try:
+            if not tri.HasNormals():
+                tri.ComputeNormals()
+            if tri.HasNormals():
+                fn = [None] + [tri.Normal(i) for i in range(1, tri.NbNodes() + 1)]
+        except Exception:
+            fn = None
+    if fn is None:
+        return None, False
+    return fn, from_cad
+
+
+def _mesh_from_shape(name, shape, scale, smooth=False):
     """Tessellation -> (mesh, content signature) in metres, or (None, None).
 
     The signature hashes the tessellated content in the prototype's local
@@ -51,6 +102,8 @@ def _mesh_from_shape(name, shape, scale):
     import hashlib
 
     verts, faces, seen = [], [], {}
+    lnorms = []
+    stats = {"cad_normal_faces": 0, "avg_normal_faces": 0, "degenerate_faces": 0}
     h = hashlib.sha1()
     exp = TopExp_Explorer(shape, TopAbs_FACE)
     while exp.More():
@@ -59,7 +112,13 @@ def _mesh_from_shape(name, shape, scale):
         tri = BRep_Tool.Triangulation_s(face, loc)
         if tri is not None:
             trsf = loc.Transformation()
+            fn, from_cad = face_node_normals(face, tri)
+            if from_cad:
+                stats["cad_normal_faces"] += 1
+            elif fn:
+                stats["avg_normal_faces"] += 1
             nodes = []
+            nn = []
             for i in range(1, tri.NbNodes() + 1):
                 p = tri.Node(i).Transformed(trsf)
                 key = (round(p.X(), 4), round(p.Y(), 4), round(p.Z(), 4))
@@ -68,6 +127,10 @@ def _mesh_from_shape(name, shape, scale):
                     seen[key] = len(verts)
                     verts.append((p.X() * scale, p.Y() * scale, p.Z() * scale))
                 nodes.append(seen[key])
+                d = fn[i] if fn else None
+                if d is not None:
+                    d = d.Transformed(trsf)  # rotate with the face location
+                nn.append(d)
             for i in range(1, tri.NbTriangles() + 1):
                 t = tri.Triangle(i)
                 try:
@@ -76,13 +139,43 @@ def _mesh_from_shape(name, shape, scale):
                     a, b, c = t.Get1(), t.Get2(), t.Get3()
                 # reversed winding: OCCT outward -> Blender CCW front face
                 f = (nodes[c - 1], nodes[b - 1], nodes[a - 1])
+                if len(set(f)) < 3:
+                    # nodes weld to a zero-area triangle: invisible, and it
+                    # crashes Blender's split-normals path on 5.4 alphas
+                    stats["degenerate_faces"] += 1
+                    continue
                 h.update(repr(f).encode())
                 faces.append(f)
+                if fn:
+                    for idx in (c, b, a):
+                        d = nn[idx - 1]
+                        lnorms.append((d.X(), d.Y(), d.Z()))
         exp.Next()
     if not faces:
         return None, None
     mesh = bpy.data.meshes.new(name)
     mesh.from_pydata(verts, [], faces)
+    if smooth and lnorms and len(lnorms) == len(faces) * 3:
+        # smooth shading WITH CAD split normals: curved surfaces shade like
+        # the CAD model, hard edges stay crisp. Zero/NaN normals fall back
+        # to the geometric face normal (split-normals crashes otherwise).
+        from mathutils import Vector
+        import math as _math
+        clean = []
+        for i, n in enumerate(lnorms):
+            bad = n is None or not all(_math.isfinite(c) for c in n) or \
+                (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]) < 1e-12
+            if bad:
+                a, b, c = faces[i // 3]
+                va, vb, vc = Vector(verts[a]), Vector(verts[b]), Vector(verts[c])
+                fnv = (vb - va).cross(vc - va)
+                n = tuple(fnv.normalized()) if fnv.length > 1e-12 else (0.0, 0.0, 1.0)
+            clean.append(n)
+        mesh.polygons.foreach_set("use_smooth", [True] * len(mesh.polygons))
+        mesh.normals_split_custom_set(clean)
+    mesh["stepforge/cad_normal_faces"] = stats["cad_normal_faces"]
+    mesh["stepforge/avg_normal_faces"] = stats["avg_normal_faces"]
+    mesh["stepforge/degenerate_faces"] = stats["degenerate_faces"]
     mesh.update()
     return mesh, h.hexdigest()
 
@@ -138,8 +231,10 @@ def build(doc, options, parent_collection=None, root_collection=None):
 
     def mesh_for(proto):
         if not options.get("share_instances", True):
-            return _mesh_from_shape(sanitize(proto.name), proto.shape, scale)[0]
-        mesh, sig = _mesh_from_shape(sanitize(proto.name), proto.shape, scale)
+            return _mesh_from_shape(sanitize(proto.name), proto.shape, scale,
+                                    options.get("smooth", False))[0]
+        mesh, sig = _mesh_from_shape(sanitize(proto.name), proto.shape, scale,
+                                     options.get("smooth", False))
         if mesh is None:
             return None
         shared = mesh_cache.get(sig)

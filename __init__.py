@@ -13,7 +13,7 @@ from bpy.props import BoolProperty, EnumProperty, StringProperty
 bl_info = {
     "name": "STEPforge — STEP Importer",
     "author": "RosellRamos — GMI Dental Implantology pipeline",
-    "version": (1, 1, 0),
+    "version": (1, 2, 0),
     "blender": (4, 2, 0),
     "location": "File > Import > STEP (.stp); Object > Re-import from Source STEP",
     "description": ("Assembly-tree STEP/IGES import with shared instance meshes, unit "
