@@ -157,20 +157,35 @@ def _mesh_from_shape(name, shape, scale, smooth=False):
     mesh.from_pydata(verts, [], faces)
     if smooth and lnorms and len(lnorms) == len(faces) * 3:
         # smooth shading WITH CAD split normals: curved surfaces shade like
-        # the CAD model, hard edges stay crisp. Zero/NaN normals fall back
-        # to the geometric face normal (split-normals crashes otherwise).
-        from mathutils import Vector
+        # the CAD model, hard edges stay crisp.
+        # 1) geometry orientation: recalc_face_normals makes winding
+        #    consistent and outward (OCCT STEP orientation is unreliable).
+        #    Loop normals are re-matched by vertex index afterwards.
+        # 2) shading normals: CAD normal per corner, sign-matched to the
+        #    outward polygon normal; zero/NaN -> polygon normal.
+        import bmesh
         import math as _math
+        vmap = [{faces[fi][k]: lnorms[fi * 3 + k] for k in range(3)}
+                for fi in range(len(faces))]
+        bm = bmesh.new()
+        bm.from_mesh(mesh)
+        bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
+        bm.to_mesh(mesh)
+        bm.free()
+        mesh.update()
         clean = []
-        for i, n in enumerate(lnorms):
-            bad = n is None or not all(_math.isfinite(c) for c in n) or \
-                (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]) < 1e-12
-            if bad:
-                a, b, c = faces[i // 3]
-                va, vb, vc = Vector(verts[a]), Vector(verts[b]), Vector(verts[c])
-                fnv = (vb - va).cross(vc - va)
-                n = tuple(fnv.normalized()) if fnv.length > 1e-12 else (0.0, 0.0, 1.0)
-            clean.append(n)
+        for p in mesh.polygons:
+            pn = p.normal
+            for li in range(p.loop_start, p.loop_start + p.loop_total):
+                vid = mesh.loops[li].vertex_index
+                n = vmap[p.index][vid]
+                bad = n is None or not all(_math.isfinite(c) for c in n) or \
+                    (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]) < 1e-12
+                if bad:
+                    n = tuple(pn)
+                elif (n[0] * pn.x + n[1] * pn.y + n[2] * pn.z) < 0:
+                    n = (-n[0], -n[1], -n[2])
+                clean.append(n)
         mesh.polygons.foreach_set("use_smooth", [True] * len(mesh.polygons))
         mesh.normals_split_custom_set(clean)
     mesh["stepforge/cad_normal_faces"] = stats["cad_normal_faces"]
