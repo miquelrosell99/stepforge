@@ -15,8 +15,14 @@ matches the CAD model.
   transforms become object matrices.
 - **CAD surface normals** (smooth shading) — exact per-vertex surface
   normals imported as custom split normals: curved surfaces shade like
-  the CAD model, hard edges stay crisp. Zero-area degenerate triangles
-  from tessellation welding are dropped automatically.
+  the CAD model, hard edges stay crisp. Geometry winding is recalculated
+  consistent-outward, so imports never render black. Zero-area
+  degenerate triangles from tessellation welding are dropped
+  automatically.
+- **Cosmetic thread cleanup** — PTC Creo cosmetic-thread shells
+  (floating all-cylinder face groups) are detected and removed before
+  tessellation, revealing the real thread geometry underneath
+  (toggleable, on by default).
 - **Automatic unit conversion** (mm/cm/µm/inch → metres).
 - **CAD colors** to viewport color and optionally shared materials.
 - **Rule-based PBR materials** — ordered rules match part name (regex) or
