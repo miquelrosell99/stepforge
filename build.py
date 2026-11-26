@@ -36,12 +36,59 @@ def _t16_to_matrix(t16):
     return Matrix((t16[0:4], t16[4:8], t16[8:12], t16[12:16]))
 
 
-def remove_cosmetic_thread_faces(shape, max_faces=3):
-    """Drop PTC Creo cosmetic-thread shells: connected components of faces
-    (linked via shared edges) that are NOT the largest component and are
-    made solely of cylindrical surfaces — the floating thread cylinder
-    Creo exports for cosmetic threads. Returns (shape, removed_count).
+def _cyl_key_and_bounds(face):
+    """(radius, axis_dir, axis_point, u_span, v_span) for a cylindrical face."""
+    from OCP.BRepAdaptor import BRepAdaptor_Surface
+    from OCP.BRepTools import BRepTools
+    ad = BRepAdaptor_Surface(face, True)
+    cyl = ad.Cylinder()
+    ax = cyl.Axis()
+    loc = ax.Location()
+    d = ax.Direction()
+    umin, umax, vmin, vmax = BRepTools.UVBounds_s(face)
+    return (cyl.Radius(), (d.X(), d.Y(), d.Z()), (loc.X(), loc.Y(), loc.Z()),
+            (umin, umax), (vmin, vmax))
+
+
+def _overlap(a0, a1, b0, b1):
+    ov = min(a1, b1) - max(a0, b0)
+    span = min(a1 - a0, b1 - b0)
+    return span > 1e-12 and ov / span > 0.3
+
+
+def _same_axis(k1, k2, tol=1e-3):
+    import math
+    r1, d1, p1, _, _ = k1
+    r2, d2, p2, _, _ = k2
+    if abs(r1 - r2) > tol:
+        return False
+    dot = abs(d1[0] * d2[0] + d1[1] * d2[1] + d1[2] * d2[2])
+    if dot < 0.999:
+        return False
+    # distance from p2 to axis line (p1, d1)
+    vx, vy, vz = (p2[0] - p1[0], p2[1] - p1[1], p2[2] - p1[2])
+    cx = vy * d1[2] - vz * d1[1]
+    cy = vz * d1[0] - vx * d1[2]
+    cz = vx * d1[1] - vy * d1[0]
+    return math.sqrt(cx * cx + cy * cy + cz * cz) < tol
+
+
+def remove_cosmetic_thread_faces(shape, tol=0.02, max_faces=12):
+    """Drop PTC Creo cosmetic-thread geometry. Two detectors:
+
+    1) Detached shells: after sewing (BRepBuilderAPI_Sewing, `tol` in file
+       units) the real body is one connected component; a cosmetic thread
+       exported as a free tube (cylinder walls + ring cap) stays detached.
+       Small non-largest components made only of cylinders/planes with at
+       least one cylinder are dropped.
+    2) Duplicate cylinder clusters: cosmetic threads sewn INTO the shell
+       appear as several coaxial, co-radial cylinder faces whose angular
+       AND axial spans overlap (legit split cylinders tile, they do not
+       overlap). Every member of an overlapping cluster is dropped.
+
+    Returns (shape, removed_face_count).
     """
+    from OCP.BRepBuilderAPI import BRepBuilderAPI_Sewing
     from OCP.TopExp import TopExp_Explorer, TopExp
     from OCP.TopAbs import TopAbs_FACE, TopAbs_EDGE
     from OCP.TopTools import (TopTools_IndexedDataMapOfShapeListOfShape,
@@ -49,20 +96,25 @@ def remove_cosmetic_thread_faces(shape, max_faces=3):
     from OCP.TopoDS import TopoDS, TopoDS_Compound
     from OCP.BRep import BRep_Builder
     from OCP.BRepAdaptor import BRepAdaptor_Surface
-    from OCP.GeomAbs import GeomAbs_Cylinder
+    from OCP.GeomAbs import GeomAbs_Cylinder, GeomAbs_Plane
+
+    sew = BRepBuilderAPI_Sewing(tol)
+    sew.Add(shape)
+    sew.Perform()
+    sewn = sew.SewedShape()
 
     faces = []
-    e = TopExp_Explorer(shape, TopAbs_FACE)
+    e = TopExp_Explorer(sewn, TopAbs_FACE)
     while e.More():
         faces.append(TopoDS.Face_s(e.Current()))
         e.Next()
     if len(faces) < 2:
-        return shape, 0
+        return sewn, 0
     fmap = TopTools_IndexedMapOfShape()
     for f in faces:
         fmap.Add(f)
     emap = TopTools_IndexedDataMapOfShapeListOfShape()
-    TopExp.MapShapesAndAncestors_s(shape, TopAbs_EDGE, TopAbs_FACE, emap)
+    TopExp.MapShapesAndAncestors_s(sewn, TopAbs_EDGE, TopAbs_FACE, emap)
     parent = list(range(len(faces)))
 
     def find(x):
@@ -84,18 +136,56 @@ def remove_cosmetic_thread_faces(shape, max_faces=3):
     comps = {}
     for i in range(len(faces)):
         comps.setdefault(find(i), []).append(i)
-    if len(comps) < 2:
-        return shape, 0
     largest = max(comps.values(), key=len)
+    allowed = (GeomAbs_Cylinder, GeomAbs_Plane)
     drop = set()
     for comp in comps.values():
         if comp is largest or len(comp) > max_faces:
             continue
-        if all(BRepAdaptor_Surface(faces[i], True).GetType() == GeomAbs_Cylinder
-               for i in comp):
+        types = [BRepAdaptor_Surface(faces[i], True).GetType() for i in comp]
+        if GeomAbs_Cylinder in types and all(t in allowed for t in types):
             drop.update(comp)
+
+    # detector 2: duplicate coaxial co-radial cylinder clusters (angular AND
+    # axial overlap — legit splits/bands tile, they never overlap). NOTE:
+    # fragmented banded cylinders are NOT dropped: real turned-thread roots
+    # have exactly that shape (validated on deg0c0037, 2026-11-26).
+    cyls = []
+    for i, f in enumerate(faces):
+        if i in drop:
+            continue
+        if BRepAdaptor_Surface(f, True).GetType() == GeomAbs_Cylinder:
+            cyls.append((i, _cyl_key_and_bounds(f)))
+    n = len(cyls)
+    dup_parent = list(range(n))
+
+    def dfind(x):
+        while dup_parent[x] != x:
+            dup_parent[x] = dup_parent[dup_parent[x]]
+            x = dup_parent[x]
+        return x
+
+    for a in range(n):
+        ia, ka = cyls[a]
+        for b in range(a + 1, n):
+            ib, kb = cyls[b]
+            if not _same_axis(ka, kb):
+                continue
+            if _overlap(ka[3][0], ka[3][1], kb[3][0], kb[3][1]) and \
+               _overlap(ka[4][0], ka[4][1], kb[4][0], kb[4][1]):
+                ra, rb = dfind(a), dfind(b)
+                if ra != rb:
+                    dup_parent[ra] = rb
+    clusters = {}
+    for a in range(n):
+        clusters.setdefault(dfind(a), []).append(a)
+    for cl in clusters.values():
+        if len(cl) >= 2:
+            for a in cl:
+                drop.add(cyls[a][0])
+
     if not drop:
-        return shape, 0
+        return sewn, 0
     out = TopoDS_Compound()
     BRep_Builder().MakeCompound(out)
     for i, f in enumerate(faces):

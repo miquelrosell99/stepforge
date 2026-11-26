@@ -206,8 +206,10 @@ class IMPORT_OT_stepforge(bpy.types.Operator, ImportHelper):
             _heal(doc)
         linear, angular = options["linear"], options["angular"]
         if options.get("clean_threads", True):
+            _tol = 0.00002 / doc.scale_m() if doc.scale_m() else 0.02
             for proto in doc.protos.values():
-                proto.shape, _n = build.remove_cosmetic_thread_faces(proto.shape)
+                proto.shape, _n = build.remove_cosmetic_thread_faces(
+                    proto.shape, tol=_tol)
         compound = TopoDS_Compound()
         BRep_Builder().MakeCompound(compound)
         for proto in doc.protos.values():
@@ -293,8 +295,10 @@ class OBJECT_OT_stepforge_reimport(bpy.types.Operator):
             if merged.get("heal"):
                 _heal(doc)
             if merged.get("clean_threads", True):
+                _tol = 0.00002 / doc.scale_m() if doc.scale_m() else 0.02
                 for proto in doc.protos.values():
-                    proto.shape, _n = build.remove_cosmetic_thread_faces(proto.shape)
+                    proto.shape, _n = build.remove_cosmetic_thread_faces(
+                        proto.shape, tol=_tol)
             compound = TopoDS_Compound()
             BRep_Builder().MakeCompound(compound)
             for proto in doc.protos.values():
