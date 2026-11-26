@@ -83,6 +83,10 @@ class IMPORT_OT_stepforge(bpy.types.Operator, ImportHelper):
         name="Custom rules", subtype="FILE_PATH",
         description="JSON ruleset: {\"rules\": [{\"field\": \"name|color\", \"pattern\": ..., \"material\": preset|\"color\"}]}")
     smooth: BoolProperty(name="Smooth shading", default=False)
+    clean_threads: BoolProperty(
+        name="Remove cosmetic threads", default=True,
+        description="Drop PTC Creo cosmetic-thread shells (floating "
+                    "all-cylinder face groups) before tessellation")
     heal: BoolProperty(
         name="Heal geometry", default=False,
         description="ShapeFix pass before tessellation (sews faces, fixes small errors; slower)")
@@ -138,6 +142,7 @@ class IMPORT_OT_stepforge(bpy.types.Operator, ImportHelper):
             "share_instances": self.share_instances,
             "scale": self.scale,
             "smooth": self.smooth,
+            "clean_threads": self.clean_threads,
             "heal": self.heal,
             "root_prefix": self.root_prefix,
             "quality": self.quality,
@@ -200,6 +205,9 @@ class IMPORT_OT_stepforge(bpy.types.Operator, ImportHelper):
         if options.get("heal"):
             _heal(doc)
         linear, angular = options["linear"], options["angular"]
+        if options.get("clean_threads", True):
+            for proto in doc.protos.values():
+                proto.shape, _n = build.remove_cosmetic_thread_faces(proto.shape)
         compound = TopoDS_Compound()
         BRep_Builder().MakeCompound(compound)
         for proto in doc.protos.values():
@@ -284,6 +292,9 @@ class OBJECT_OT_stepforge_reimport(bpy.types.Operator):
             doc = StepDoc(src)
             if merged.get("heal"):
                 _heal(doc)
+            if merged.get("clean_threads", True):
+                for proto in doc.protos.values():
+                    proto.shape, _n = build.remove_cosmetic_thread_faces(proto.shape)
             compound = TopoDS_Compound()
             BRep_Builder().MakeCompound(compound)
             for proto in doc.protos.values():

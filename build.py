@@ -36,6 +36,74 @@ def _t16_to_matrix(t16):
     return Matrix((t16[0:4], t16[4:8], t16[8:12], t16[12:16]))
 
 
+def remove_cosmetic_thread_faces(shape, max_faces=3):
+    """Drop PTC Creo cosmetic-thread shells: connected components of faces
+    (linked via shared edges) that are NOT the largest component and are
+    made solely of cylindrical surfaces — the floating thread cylinder
+    Creo exports for cosmetic threads. Returns (shape, removed_count).
+    """
+    from OCP.TopExp import TopExp_Explorer, TopExp
+    from OCP.TopAbs import TopAbs_FACE, TopAbs_EDGE
+    from OCP.TopTools import (TopTools_IndexedDataMapOfShapeListOfShape,
+                              TopTools_IndexedMapOfShape)
+    from OCP.TopoDS import TopoDS, TopoDS_Compound
+    from OCP.BRep import BRep_Builder
+    from OCP.BRepAdaptor import BRepAdaptor_Surface
+    from OCP.GeomAbs import GeomAbs_Cylinder
+
+    faces = []
+    e = TopExp_Explorer(shape, TopAbs_FACE)
+    while e.More():
+        faces.append(TopoDS.Face_s(e.Current()))
+        e.Next()
+    if len(faces) < 2:
+        return shape, 0
+    fmap = TopTools_IndexedMapOfShape()
+    for f in faces:
+        fmap.Add(f)
+    emap = TopTools_IndexedDataMapOfShapeListOfShape()
+    TopExp.MapShapesAndAncestors_s(shape, TopAbs_EDGE, TopAbs_FACE, emap)
+    parent = list(range(len(faces)))
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    for i in range(1, emap.Extent() + 1):
+        prev = -1
+        for s in emap.FindFromIndex(i):
+            idx = fmap.FindIndex(s) - 1
+            if prev >= 0 and idx >= 0:
+                ra, rb = find(prev), find(idx)
+                if ra != rb:
+                    parent[ra] = rb
+            prev = idx
+
+    comps = {}
+    for i in range(len(faces)):
+        comps.setdefault(find(i), []).append(i)
+    if len(comps) < 2:
+        return shape, 0
+    largest = max(comps.values(), key=len)
+    drop = set()
+    for comp in comps.values():
+        if comp is largest or len(comp) > max_faces:
+            continue
+        if all(BRepAdaptor_Surface(faces[i], True).GetType() == GeomAbs_Cylinder
+               for i in comp):
+            drop.update(comp)
+    if not drop:
+        return shape, 0
+    out = TopoDS_Compound()
+    BRep_Builder().MakeCompound(out)
+    for i, f in enumerate(faces):
+        if i not in drop:
+            BRep_Builder().Add(out, f)
+    return out, len(drop)
+
+
 def face_node_normals(face, tri):
     """Per-node normals (1-indexed list of gp_Dir) for one tessellated face.
 
@@ -206,6 +274,7 @@ def default_options():
         "share_instances": True,
         "scale": 1.0,                  # extra user multiplier (unit scale is automatic)
         "smooth": False,
+        "clean_threads": True,
         "heal": False,
         "root_prefix": "",
         "gmi_register": True,
